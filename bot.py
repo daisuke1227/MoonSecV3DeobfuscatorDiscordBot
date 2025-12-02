@@ -23,7 +23,6 @@ def get_lua_path():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     system = platform.system()
     
-    # CHANGED: Paths now point directly to 'bin/' instead of 'bin/win/'
     if system == "Windows":
         return os.path.join(current_dir, "bin", "lua5.1.exe")
     elif system == "Linux":
