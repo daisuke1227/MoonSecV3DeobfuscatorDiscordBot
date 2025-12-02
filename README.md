@@ -2,13 +2,6 @@
 
 A Discord bot designed to automate the deobfuscation of Lua scripts using MoonSec V3.
 
-## Features
-
-- **Automated Deobfuscation**: Automatically processes uploaded `.lua` or `.txt` files.
-- **Link Support**: Downloads and processes files from direct HTTP links.
-- **Sandboxed Execution**: Uses a specific Lua binary and environment for safety.
-- **Discord Integration**: seamless integration with Discord for easy file handling.
-
 ## Prerequisites
 
 Before you begin, ensure you have the following installed:
