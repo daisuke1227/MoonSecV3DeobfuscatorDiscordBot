@@ -63,6 +63,8 @@ async def process_pipeline(ctx, input_filepath):
     
     status_msg = await ctx.send(f"Processing... \nInput: {os.path.basename(input_filepath)}\nTarget: {os.path.basename(expected_decompiled_path)}")
 
+    open_file_handles = []
+
     try:
         my_env = os.environ.copy()
         if platform.system() == "Linux":
@@ -80,8 +82,6 @@ async def process_pipeline(ctx, input_filepath):
         if process_moon.returncode != 0:
             error_output = process_moon.stderr or process_moon.stdout
             await safe_send(ctx, f"Moon Error:\n```{error_output}```")
-            if os.path.exists(input_filepath): os.remove(input_filepath)
-            await status_msg.delete()
             return
 
         cmd_decom = [LUA_BIN, DECOM_SCRIPT, output_luac_path, expected_decompiled_path]
@@ -95,10 +95,14 @@ async def process_pipeline(ctx, input_filepath):
         files_to_send = []
         
         if os.path.exists(output_luac_path):
-            files_to_send.append(discord.File(output_luac_path))
+            f1 = open(output_luac_path, 'rb')
+            open_file_handles.append(f1)
+            files_to_send.append(discord.File(f1, filename=output_luac_name))
         
         if os.path.exists(expected_decompiled_path):
-            files_to_send.append(discord.File(expected_decompiled_path))
+            f2 = open(expected_decompiled_path, 'rb')
+            open_file_handles.append(f2)
+            files_to_send.append(discord.File(f2, filename=os.path.basename(expected_decompiled_path)))
         else:
             await safe_send(ctx, f"Decompiled file missing. Lua Output:\n```{process_decom.stdout}```")
 
@@ -111,13 +115,20 @@ async def process_pipeline(ctx, input_filepath):
         await ctx.send(f"System Error: {str(e)}")
 
     finally:
+        for f in open_file_handles:
+            f.close()
+
         try:
-            if os.path.exists(input_filepath): os.remove(input_filepath)
-            if os.path.exists(output_luac_path): os.remove(output_luac_path)
-            if os.path.exists(expected_decompiled_path): os.remove(expected_decompiled_path)
+            if os.path.exists(input_filepath): 
+                os.remove(input_filepath)
+            if os.path.exists(output_luac_path): 
+                os.remove(output_luac_path)
+            if os.path.exists(expected_decompiled_path): 
+                os.remove(expected_decompiled_path)
+            
             await status_msg.delete()
-        except:
-            pass
+        except Exception as e:
+            print(f"Cleanup error: {e}")
 
 @bot.event
 async def on_ready():
