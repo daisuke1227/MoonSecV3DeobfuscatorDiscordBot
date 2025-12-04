@@ -1,5 +1,9 @@
 # MoonSecV3DeobfuscatorDiscordBot
 
+
+### This is really bad and it doesnt have the same output as medal oracle or luadec but this is just a passion project that I really care about I hate obfuscated scripts so much since people cant learn how to make scripts obfuscation also hinders the user because they dont know what code there running it can be malicious and even steal your data like a lot of scripts ive deobfuscated obfuscated scripts can steal so much data you didnt even know about so deobfuscators like 25ms threaded and mine are very important in more ways then just skidding
+
+
 A Discord bot designed to automate the deobfuscation of Lua scripts using MoonSec V3.
 
 ## Prerequisites
