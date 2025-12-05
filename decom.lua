@@ -236,8 +236,12 @@ local function parse_function(r, parent)
 	end;
 	return func
 end;
-local function reg(n, func_id)
-	return "r" .. n .. "_" .. (func_id or 0)
+local function reg(n, func_id, version)
+	if version and version > 0 then
+		return "r" .. n .. "_" .. (func_id or 0) .. "_" .. version
+	else
+		return "r" .. n .. "_" .. (func_id or 0)
+	end
 end;
 local function const_str(c)
 	if c.type == "nil" then
@@ -260,9 +264,15 @@ local function emit(ctx, line)
 end;
 local function get_reg_name(ctx, n)
 	if not ctx.reg_names[n] then
-		ctx.reg_names[n] = reg(n, ctx.func.id)
+		ctx.reg_names[n] = reg(n, ctx.func.id, ctx.reg_versions[n])
 	end;
 	return ctx.reg_names[n]
+end;
+local function new_reg_name(ctx, n)
+	ctx.reg_versions[n] = (ctx.reg_versions[n] or 0) + 1
+	local name = reg(n, ctx.func.id, ctx.reg_versions[n])
+	ctx.reg_names[n] = name
+	return name
 end;
 local function get_expr(ctx, n)
 	return ctx.regs[n] or get_reg_name(ctx, n)
@@ -278,7 +288,7 @@ local function get_rk(ctx, rk)
 	end
 end;
 local function resolve_upval(ctx, idx)
-	return "upval_" .. idx
+	return ctx.upvalues[idx + 1] or ("upval_" .. idx)
 end;
 local function analyze_control_flow(func)
 	local code = func.code;
@@ -318,10 +328,12 @@ local function create_ctx(func, parent)
 		parent = parent,
 		regs = {},
 		reg_names = {},
+		reg_versions = {},
 		declared = {},
 		self_info = nil,
 		tables = {},
 		pending_closures = {},
+		upvalues = {},
 		indent = 0,
 		statements = {},
 		control_flow = analyze_control_flow(func)
@@ -590,23 +602,15 @@ function decompile_func(ctx, func)
 			elseif c == 1 then
 				emit(ctx, call)
 			elseif c == 2 then
-				local rn = get_reg_name(ctx, a)
-				if not ctx.declared[a] then
-					ctx.declared[a] = true;
-					emit(ctx, "local " .. rn .. " = " .. call)
-				else
-					emit(ctx, rn .. " = " .. call)
-				end;
+				local rn = new_reg_name(ctx, a)
+				emit(ctx, "local " .. rn .. " = " .. call)
 				set_expr(ctx, a, rn)
-				ctx.reg_names[a] = rn
 			else
 				local rets = {}
 				for i = a, a + c - 2 do
-					local rn = get_reg_name(ctx, i)
+					local rn = new_reg_name(ctx, i)
 					table.insert(rets, rn)
-					ctx.declared[i] = true;
 					set_expr(ctx, i, rn)
-					ctx.reg_names[i] = rn
 				end;
 				emit(ctx, "local " .. table.concat(rets, ", ") .. " = " .. call)
 			end
@@ -633,14 +637,12 @@ function decompile_func(ctx, func)
 			end
 		elseif op == OP.FORLOOP then
 		elseif op == OP.FORPREP then
-			emit(ctx, "for " .. get_reg_name(ctx, a + 3) .. " = " .. get_expr(ctx, a) .. ", " .. get_expr(ctx, a + 1) .. ", " .. get_expr(ctx, a + 2) .. " do")
+			emit(ctx, "for " .. new_reg_name(ctx, a + 3) .. " = " .. get_expr(ctx, a) .. ", " .. get_expr(ctx, a + 1) .. ", " .. get_expr(ctx, a + 2) .. " do")
 			ctx.indent = ctx.indent + 1;
-			ctx.declared[a + 3] = true
 		elseif op == OP.TFORLOOP then
 			local vars = {}
 			for i = a + 3, a + 2 + c do
-				table.insert(vars, get_reg_name(ctx, i))
-				ctx.declared[i] = true
+				table.insert(vars, new_reg_name(ctx, i))
 			end;
 			emit(ctx, "for " .. table.concat(vars, ", ") .. " in " .. get_expr(ctx, a) .. " do")
 			ctx.indent = ctx.indent + 1
@@ -674,18 +676,24 @@ function decompile_func(ctx, func)
 				if is_named then
 					emit(ctx, "function " .. fn .. "(" .. table.concat(params, ", ") .. ")")
 				else
-					emit(ctx, "local " .. get_reg_name(ctx, a) .. " = function(" .. table.concat(params, ", ") .. ")")
-					ctx.declared[a] = true
+					emit(ctx, "local " .. new_reg_name(ctx, a) .. " = function(" .. table.concat(params, ", ") .. ")")
 				end;
 				emit(ctx, "  -- line: [" .. proto.line_start .. ", " .. proto.line_end .. "] id: " .. proto.id)
 				local child = create_ctx(proto, ctx)
+				for i = 1, proto.nups do
+					local up_ins = code[pc + i]
+					if up_ins.op == OP.MOVE then
+						child.upvalues[i] = get_expr(ctx, up_ins.b)
+					elseif up_ins.op == OP.GETUPVAL then
+						child.upvalues[i] = resolve_upval(ctx, up_ins.b)
+					end
+				end;
 				child.indent = ctx.indent + 1;
 				decompile_func(child, proto)
 				for _, s in ipairs(child.statements) do
 					table.insert(ctx.statements, s)
 				end;
 				emit(ctx, "end")
-				set_expr(ctx, a, get_reg_name(ctx, a))
 				if is_named then
 					pc = pc + 1
 				end
@@ -698,8 +706,7 @@ function decompile_func(ctx, func)
 			else
 				local vars = {}
 				for i = a, a + b - 2 do
-					table.insert(vars, get_reg_name(ctx, i))
-					ctx.declared[i] = true
+					table.insert(vars, new_reg_name(ctx, i))
 				end;
 				emit(ctx, "local " .. table.concat(vars, ", ") .. " = ...")
 			end
@@ -721,9 +728,6 @@ local reader = Reader:new(data)
 parse_header(reader)
 local main = parse_function(reader, nil)
 local ctx = create_ctx(main, nil)
-table.insert(ctx.statements, "-- filename: " .. (main.source or ""))
-table.insert(ctx.statements, "-- version: lua51")
-table.insert(ctx.statements, "-- line: [" .. main.line_start .. ", " .. main.line_end .. "] id: " .. main.id)
 local success, err = pcall(decompile_func, ctx, main)
 if not success then
 	io.stderr:write("Decompilation error: " .. tostring(err) .. "\n")
