@@ -1,5 +1,48 @@
-local infile = arg[1] or "ByteCode.luac"
-local outfile = arg[2] or "DecompiledOutput.lua"
+local function parse_args(argv)
+	local infile
+	local outfile
+	local show_help = false
+
+	local i = 1
+	while i <= #argv do
+		local a = argv[i]
+		if a == "-h" or a == "--help" then
+			show_help = true
+			break
+		elseif a == "-i" or a == "--in" then
+			i = i + 1
+			infile = argv[i]
+		elseif a == "-o" or a == "--out" then
+			i = i + 1
+			outfile = argv[i]
+		elseif a and a:sub(1, 1) == "-" then
+			io.stderr:write("Unknown option: " .. tostring(a) .. "\n")
+			show_help = true
+			break
+		else
+			-- Back-compat positional args: decom.lua <in> <out>
+			if not infile then
+				infile = a
+			elseif not outfile then
+				outfile = a
+			else
+				-- Ignore extras
+			end
+		end
+		i = i + 1
+	end
+
+	if show_help then
+		print("Usage:")
+		print("  lua5.1 decom.lua <input.luac> <output.lua>")
+		print("  lua5.1 decom.lua -i <input.luac> -o <output.lua>")
+		os.exit(0)
+	end
+
+	return infile or "ByteCode.luac", outfile or "DecompiledOutput.lua"
+end
+
+local infile, outfile = parse_args(arg or {})
 local function rshift(n, bits)
 	return math.floor(n / 2 ^ bits)
 end;
@@ -177,6 +220,7 @@ local function parse_function(r, parent)
 		local instr = r:int()
 		local op = instr % 64;
 		local a = math.floor(instr / 64) % 256;
+		local ax = math.floor(instr / 64);
 		local c = math.floor(instr / 16384) % 512;
 		local b = math.floor(instr / 8388608) % 512;
 		local bx = math.floor(instr / 16384) % 262144;
@@ -187,7 +231,8 @@ local function parse_function(r, parent)
 			b = b,
 			c = c,
 			bx = bx,
-			sbx = sbx
+			sbx = sbx,
+			ax = ax
 		})
 	end;
 	local nconst = r:int()
@@ -254,6 +299,16 @@ end;
 local function is_ident(s)
 	return s:match("^[%a_][%w_]*$") ~= nil
 end;
+
+local function global_name_expr(name)
+	if type(name) ~= "string" then
+		return "_G[\"?\"]"
+	end
+	if is_ident(name) then
+		return name
+	end
+	return "_G[" .. string.format("%q", name) .. "]"
+end
 local function emit(ctx, line)
 	local indent_str = string.rep("  ", ctx.indent)
 	table.insert(ctx.statements, indent_str .. line)
@@ -268,8 +323,27 @@ local function get_expr(ctx, n)
 	return ctx.regs[n] or get_reg_name(ctx, n)
 end;
 local function set_expr(ctx, n, expr)
+	-- Overwriting a register invalidates any in-progress table construction or pending closure.
+	ctx.tables[n] = nil
+	ctx.pending_closures[n] = nil
 	ctx.regs[n] = expr
 end;
+
+local function materialize_reg(ctx, n)
+	if ctx.pending_closures[n] then
+		local v = ctx.pending_closures[n]
+		ctx.pending_closures[n] = nil
+		set_expr(ctx, n, v)
+		return v
+	end
+	if ctx.tables[n] then
+		local v = build_table(ctx, n, ctx.indent)
+		ctx.tables[n] = nil
+		set_expr(ctx, n, v)
+		return v
+	end
+	return get_expr(ctx, n)
+end
 local function get_rk(ctx, rk)
 	if rk < 256 then
 		return get_expr(ctx, rk)
@@ -387,6 +461,13 @@ function decompile_func(ctx, func)
 		local op, a, b, c = ins.op, ins.a, ins.b, ins.c;
 		local bx, sbx = ins.bx, ins.sbx;
 		if op == OP.MOVE then
+			-- Preserve pending table/closure materialization across register moves.
+			if ctx.tables[b] then
+				ctx.tables[a] = ctx.tables[b]
+			end
+			if ctx.pending_closures[b] then
+				ctx.pending_closures[a] = ctx.pending_closures[b]
+			end
 			set_expr(ctx, a, get_expr(ctx, b))
 		elseif op == OP.LOADK then
 			set_expr(ctx, a, const_str(func.constants[bx + 1]))
@@ -402,7 +483,9 @@ function decompile_func(ctx, func)
 		elseif op == OP.GETUPVAL then
 			set_expr(ctx, a, resolve_upval(ctx, b))
 		elseif op == OP.GETGLOBAL then
-			set_expr(ctx, a, func.constants[bx + 1].value)
+			local k = func.constants[bx + 1]
+			local name = (k and k.type == "string") and k.value or tostring(k and k.value or "?")
+			set_expr(ctx, a, global_name_expr(name))
 		elseif op == OP.GETTABLE then
 			local obj = get_expr(ctx, b)
 			local key = get_rk(ctx, c)
@@ -417,9 +500,11 @@ function decompile_func(ctx, func)
 				set_expr(ctx, a, obj .. "[" .. key .. "]")
 			end
 		elseif op == OP.SETGLOBAL then
-			emit(ctx, func.constants[bx + 1].value .. " = " .. get_expr(ctx, a))
+			local k = func.constants[bx + 1]
+			local name = (k and k.type == "string") and k.value or tostring(k and k.value or "?")
+			emit(ctx, global_name_expr(name) .. " = " .. materialize_reg(ctx, a))
 		elseif op == OP.SETUPVAL then
-			emit(ctx, resolve_upval(ctx, b) .. " = " .. get_expr(ctx, a))
+			emit(ctx, resolve_upval(ctx, b) .. " = " .. materialize_reg(ctx, a))
 		elseif op == OP.SETTABLE then
 			local key = get_rk(ctx, b)
 			local val = c < 256 and ctx.pending_closures[c] or nil;
@@ -623,11 +708,11 @@ function decompile_func(ctx, func)
 			if b == 1 then
 				emit(ctx, "return")
 			elseif b == 2 then
-				emit(ctx, "return " .. get_expr(ctx, a))
+				emit(ctx, "return " .. materialize_reg(ctx, a))
 			else
 				local rets = {}
 				for i = a, a + b - 2 do
-					table.insert(rets, get_expr(ctx, i))
+					table.insert(rets, materialize_reg(ctx, i))
 				end;
 				emit(ctx, "return " .. table.concat(rets, ", "))
 			end
@@ -645,9 +730,29 @@ function decompile_func(ctx, func)
 			emit(ctx, "for " .. table.concat(vars, ", ") .. " in " .. get_expr(ctx, a) .. " do")
 			ctx.indent = ctx.indent + 1
 		elseif op == OP.SETLIST then
-			if ctx.tables[a] then
+			local t = ctx.tables[a]
+			if t then
+				local block = c
+				if block == 0 then
+					local next_ins = code[pc + 1]
+					if next_ins and next_ins.ax then
+						block = next_ins.ax
+						pc = pc + 1
+					else
+						block = 1
+					end
+				end
+				block = block - 1
+				local start_index = block * 50 + 1
 				for i = 1, b do
-					table.insert(ctx.tables[a].array, get_expr(ctx, a + i))
+					local v = get_expr(ctx, a + i)
+					local idx = start_index + (i - 1)
+					if idx == (#t.array + 1) then
+						table.insert(t.array, v)
+					else
+						-- Non-sequential inserts become explicit numeric keys.
+						table.insert(t.entries, { key = tostring(idx), val = v, key_safe = false })
+					end
 				end
 			end
 		elseif op == OP.CLOSURE then
@@ -708,6 +813,12 @@ function decompile_func(ctx, func)
 		end;
 		pc = pc + 1
 	end
+
+	-- Ensure syntactically valid output even when control-flow analysis misses an end.
+	while ctx.indent > 0 do
+		ctx.indent = ctx.indent - 1
+		emit(ctx, "end")
+	end
 end;
 local f = io.open(infile, "rb")
 if not f then
@@ -718,8 +829,18 @@ local data = f:read("*a")
 f:close()
 print("Decompiling: " .. infile)
 local reader = Reader:new(data)
-parse_header(reader)
-local main = parse_function(reader, nil)
+local ok_h, err_h = pcall(parse_header, reader)
+if not ok_h then
+	io.stderr:write("Bytecode header error: " .. tostring(err_h) .. "\n")
+	os.exit(1)
+end
+
+local ok_p, main_or_err = pcall(parse_function, reader, nil)
+if not ok_p then
+	io.stderr:write("Bytecode parse error: " .. tostring(main_or_err) .. "\n")
+	os.exit(1)
+end
+local main = main_or_err
 local ctx = create_ctx(main, nil)
 table.insert(ctx.statements, "-- filename: " .. (main.source or ""))
 table.insert(ctx.statements, "-- version: lua51")
